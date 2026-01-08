@@ -145,7 +145,7 @@ func (*DefaultDispatcher) Close() error {
 	return nil
 }
 
-func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, error) {
+func (d *DefaultDispatcher) getLink(ctx context.Context, destination net.Destination) (*transport.Link, *transport.Link, error) {
 	opt := pipe.OptionsFromContext(ctx)
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
@@ -167,8 +167,14 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	}
 
 	if user != nil && len(user.Email) > 0 {
+		// Get domain for latency test detection
+		domain := ""
+		if destination.IsValid() && destination.Address.Family().IsDomain() {
+			domain = destination.Address.Domain()
+		}
+
 		// Speed Limit and Device Limit
-		bucket, ok, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, sessionInbound.Source.Address.IP().String())
+		bucket, ok, reject := d.Limiter.GetUserBucket(sessionInbound.Tag, user.Email, sessionInbound.Source.Address.IP().String(), domain)
 		if reject {
 			errors.LogWarning(ctx, "Devices reach the limit: ", user.Email)
 			common.Close(outboundLink.Writer)
@@ -256,7 +262,7 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	}
 
 	sniffingRequest := content.SniffingRequest
-	inbound, outbound, err := d.getLink(ctx)
+	inbound, outbound, err := d.getLink(ctx, destination)
 	if err != nil {
 		return nil, err
 	}

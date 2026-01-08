@@ -161,7 +161,25 @@ func (l *Limiter) GetOnlineDevice(tag string) (*[]api.OnlineUser, error) {
 	return &onlineUser, nil
 }
 
-func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
+// 修改1: 极简的延迟测试检查，只接受域名字符串
+func isLatencyTestRequest(domain string) bool {
+	if domain == "" {
+		return false
+	}
+	
+	// 常见延迟测试域名特征
+	if strings.Contains(domain, "gstatic.com") ||
+	   strings.Contains(domain, "cp.cloudflare.com") || // Cloudflare Captive Portal
+	   strings.Contains(domain, "msftconnecttest.com") || // Windows Network Connectivity Status Indicator
+	   strings.Contains(domain, "msftncsi.com") {
+		return true
+	}
+	
+	return false
+}
+
+// 修改2: 优化 GetUserBucket 参数，直接传 domain 避免 map 分配
+func (l *Limiter) GetUserBucket(tag string, email string, ip string, domain string) (limiter *rate.Limiter, SpeedLimit bool, Reject bool) {
 	if value, ok := l.InboundInfo.Load(tag); ok {
 		var (
 			userLimit        uint64 = 0
@@ -178,34 +196,42 @@ func (l *Limiter) GetUserBucket(tag string, email string, ip string) (limiter *r
 			deviceLimit = u.DeviceLimit
 		}
 
-		// Local device limit
-		ipMap := new(sync.Map)
-		ipMap.Store(ip, uid)
-		// If any device is online
-		if v, ok := inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap); ok {
-			ipMap := v.(*sync.Map)
-			// If this is a new ip
-			if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
-				counter := 0
-				ipMap.Range(func(key, value interface{}) bool {
-					counter++
-					return true
-				})
-				if counter > deviceLimit && deviceLimit > 0 {
-					ipMap.Delete(ip)
+		// 修改3: 判断是否是延迟测试
+		isLatencyTest := isLatencyTestRequest(domain)
+
+		// 延迟测试：不记录为在线设备，但应用限速
+		if !isLatencyTest {
+			// 正常连接：记录为在线设备，应用设备限制
+			// Local device limit
+			ipMap := new(sync.Map)
+			ipMap.Store(ip, uid)
+			// If any device is online
+			if v, ok := inboundInfo.UserOnlineIP.LoadOrStore(email, ipMap); ok {
+				ipMap := v.(*sync.Map)
+				// If this is a new ip
+				if _, ok := ipMap.LoadOrStore(ip, uid); !ok {
+					counter := 0
+					ipMap.Range(func(key, value interface{}) bool {
+						counter++
+						return true
+					})
+					if counter > deviceLimit && deviceLimit > 0 {
+						ipMap.Delete(ip)
+						return nil, false, true
+					}
+				}
+			}
+
+			// GlobalLimit - 只对正常连接应用全局限制
+			if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
+				if reject := globalLimit(inboundInfo, email, uid, ip, deviceLimit); reject {
 					return nil, false, true
 				}
 			}
 		}
+		// 延迟测试不应用设备限制，直接跳到限速逻辑
 
-		// GlobalLimit
-		if inboundInfo.GlobalLimit.config != nil && inboundInfo.GlobalLimit.config.Enable {
-			if reject := globalLimit(inboundInfo, email, uid, ip, deviceLimit); reject {
-				return nil, false, true
-			}
-		}
-
-		// Speed limit
+		// Speed limit - 所有连接都应用限速
 		limit := determineRate(nodeLimit, userLimit) // Determine the speed limit rate
 		if limit > 0 {
 			limiter := rate.NewLimiter(rate.Limit(limit), int(limit)) // Byte/s

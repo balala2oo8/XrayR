@@ -269,9 +269,12 @@ func (c *APIClient) ReportUserTraffic(userTraffic *[]api.UserTraffic) error {
 	// json structure: {uid1: [u, d], uid2: [u, d], uid1: [u, d], uid3: [u, d]}
 	data := make(map[int][]int64, len(*userTraffic))
 	for _, traffic := range *userTraffic {
+		// 过滤掉下载流量小于1KB的记录(延迟测试)
+		if traffic.Download < 1024 {
+			continue
+		}
 		data[traffic.UID] = []int64{traffic.Upload, traffic.Download}
 	}
-
 	res, err := c.client.R().SetBody(data).ForceContentType("application/json").Post(path)
 	_, err = c.parseResponse(res, path, err)
 	if err != nil {
@@ -306,6 +309,44 @@ func (c *APIClient) ReportNodeStatus(nodeStatus *api.NodeStatus) (err error) {
 
 // ReportNodeOnlineUsers implements the API interface
 func (c *APIClient) ReportNodeOnlineUsers(onlineUserList *[]api.OnlineUser) error {
+	path := "/api/v1/server/UniProxy/alive"
+
+	// json structure: {uid1: [ip1, ip2], uid2: [ip1, ip2, ip3...]}
+	data := make(map[int][]string)
+	seenIPs := make(map[string]bool) // 用于去重
+
+	for _, user := range *onlineUserList {
+		// 去空：跳过空IP
+		if user.IP == "" {
+			continue
+		}
+
+		// 去重：检查是否已处理过这个用户+IP组合
+		key := fmt.Sprintf("%d:%s", user.UID, user.IP)
+		if seenIPs[key] {
+			continue // 已存在，跳过
+		}
+		seenIPs[key] = true
+
+		// 添加到数据中
+		if _, exists := data[user.UID]; !exists {
+			data[user.UID] = []string{}
+		}
+		data[user.UID] = append(data[user.UID], user.IP)
+	}
+
+	// 如果没有有效数据，可以跳过发送
+	if len(data) == 0 {
+		return nil
+	}
+
+	res, err := c.client.R().SetBody(data).ForceContentType("application/json").Post(path)
+
+	_, err = c.parseResponse(res, path, err)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
